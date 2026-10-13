@@ -1,6 +1,6 @@
-# Supplementary Material
+# ProVerif Verification Results
 
-This repository provides supplementary materials for **Scalable Edge-Autonomous Vehicle Admission with Reversible Revocation**.
+This repository provides sthe ProVerif models and verification results for **Scalable Edge-Autonomous Vehicle Admission with Reversible Revocation**.
 
 ## ProVerif Models
 
