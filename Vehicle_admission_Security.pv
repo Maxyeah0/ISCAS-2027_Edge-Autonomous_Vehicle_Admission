@@ -1,0 +1,157 @@
+free c: channel.
+type host.
+type nonce.
+type challenge.
+type skey.
+type response.
+
+
+fun H7(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring, bitstring):bitstring.
+
+(*--AES-GCM operation--*)
+fun aead_enc(bitstring, skey, nonce): bitstring.
+reduc forall m: bitstring, k:skey, n:nonce; aead_dec(aead_enc(m,k,n),k,n) = m.
+(* Symmetric key encryption *)
+type key.
+fun senc(skey, bitstring): bitstring.
+reduc forall k: skey, m: bitstring; sdec(k, senc(k,m)) = m.
+(*--XOR operation--*)
+fun XOR(bitstring, bitstring): bitstring.
+equation forall x: bitstring, y: bitstring; XOR(XOR(x, y), y) = x.
+(*--PUF operation--*)
+fun PUFi(challenge):skey [private].
+(*--MAC operation--*)
+fun HMAC(skey, bitstring): bitstring. (* MAC specification, with no equation. *)
+(*--HKDF operation--*)
+fun kdfSK(skey, bitstring): skey.
+fun kdfK2(skey, bitstring): skey.
+(*Counter operation*)
+fun succ(bitstring): bitstring.
+(* 定义初始值 *)
+const zero: bitstring.
+(*credential definition*)
+fun credential(bitstring, skey, nonce): bitstring [data].
+fun auth1_data(bitstring, nonce, nonce, nonce, host): bitstring [data].
+
+(* Data Converter *)
+fun challenge_to_bitstring(challenge): bitstring [data,typeConverter].
+fun response_to_bitstring(response): bitstring [data,typeConverter].
+fun nonce_to_bitstring(nonce): bitstring [data,typeConverter].
+fun host_to_bitstring(host): bitstring [data,typeConverter].
+fun nat_to_bitstring(nat): bitstring [data,typeConverter].
+fun skey_to_bitstring(skey): bitstring [data,typeConverter].
+fun bitstring_to_skey(bitstring): skey [data,typeConverter].
+fun bitstring_to_host(bitstring): host [data,typeConverter].
+fun bitstring_to_nonce(bitstring): nonce [data,typeConverter].
+fun response_to_skey(response): skey [data,typeConverter].
+
+
+
+free IDi,g,IDr: host[private].
+(* Secrecy Queries *)
+free messageV, messageR: bitstring [private].
+query attacker(messageV).
+query attacker(messageR).
+
+(* Strong secrecy: the attacker is unable to distinguish when the secret changes. *)
+noninterf messageV.
+noninterf messageR.
+
+(*weaksecret messageV.
+weaksecret messageR.*)
+
+(*identity secrecy*)
+query attacker(IDi).
+
+(*event definitions*)
+event VehicleStart(
+    host, nonce
+).
+event RSUResponse(
+    host, bitstring, nonce, nonce, skey
+).
+event VehicleAccept(
+    host, nonce, nonce, skey
+).
+event RSUAccept(
+    host, bitstring, nonce, nonce, skey
+).
+event VehicleConfirm(
+    host, nonce, nonce, skey
+).
+
+(*Vehicle-to-RSU authentication*)
+query g:host, rho:bitstring,
+      Ni:nonce, Nj:nonce, k:skey;
+inj-event(RSUAccept(g,rho,Ni,Nj,k))
+==>
+inj-event(VehicleConfirm(g,Ni,Nj,k)).
+(*RSU-to-Vehicle authentication*)
+query g:host, rho:bitstring,
+      Ni:nonce, Nj:nonce, k:skey;
+inj-event(VehicleAccept(g,Ni,Nj,k))
+==>
+inj-event(RSUResponse(g,rho,Ni,Nj,k)).
+
+
+
+
+
+let vehicle(nIV: nonce, Ci: challenge,  g: host, Mi: bitstring) = 
+    let Ki = PUFi(Ci) in
+    new Ni: nonce;
+    new ti:nonce;
+    event VehicleStart(g,Ni);
+    let AM1 = HMAC(Ki,auth1_data(Mi,ti,Ni,nIV,g)) in
+    let M1 = (Mi,ti,g,nIV,Ni,AM1) in
+    out(c,M1);
+
+    in(c,(tj:nonce, Nj: nonce, AM2:bitstring));
+    let D' = H7(Mi,nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),nonce_to_bitstring(ti),nonce_to_bitstring(tj),host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK' = kdfSK(Ki,D') in
+    let KR' = kdfK2(Ki,D') in
+    let (nIV_new: nonce, Mi_new: bitstring) = aead_dec(AM2, KR', nIV) in
+    event VehicleAccept(g,Ni,Nj,SK');
+    event VehicleConfirm(g,Ni,Nj,SK');
+    new nV: nonce;
+    let AppV = aead_enc(messageV, SK', nV) in
+    out(c, (nV,AppV));
+    out(c, senc(SK', messageV)).
+
+let RSU(g:host, Kenc:skey, IDr: host) = 
+    in(c,M1:bitstring);
+    let (Mi':bitstring,ti:nonce,g':host,nIV:nonce,Ni:nonce, AM1:bitstring) = M1 in
+    if g = g' then
+    let credential(rho:bitstring, Ki':skey, texp:nonce) = aead_dec(Mi',Kenc,nIV) in
+    new tj:nonce;
+    let AM1' = HMAC(Ki',auth1_data(Mi',ti, Ni, nIV, g)) in
+    if AM1' = AM1 then
+    new Nj: nonce;
+    new nIV_new: nonce;
+    let D = H7(Mi',nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),nonce_to_bitstring(ti),nonce_to_bitstring(tj),host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK = kdfSK(Ki',D) in
+    let KR = kdfK2(Ki',D) in
+    event RSUResponse(g',rho,Ni,Nj,SK);
+    let Mi_new = aead_enc(credential(rho, Ki',texp),Kenc,nIV_new) in
+    let ER = aead_enc((nIV_new, Mi_new),KR, nIV) in
+    let M2 = (tj,Nj,ER) in
+    out(c,M2);
+
+    in(c,(nV:nonce, AppV:bitstring));
+    let receivedV = aead_dec(AppV,SK,nV) in
+    event RSUAccept(g',rho,Ni,Nj,SK);
+    out(c, senc(SK, messageR)).
+
+process
+    new Ci: challenge;
+    new nIV:nonce;
+    new Kenc: skey;
+    new Krev: skey;
+    new texp: nonce;
+    let Ki = PUFi(Ci) in
+    let rho = HMAC(Krev, (host_to_bitstring(IDi),host_to_bitstring(g))) in
+    let Mi = aead_enc(credential(rho, Ki, texp),Kenc,nIV) in
+    (!vehicle(nIV, Ci, g, Mi)) | 
+    (!RSU(g, Kenc, IDr))
+
+

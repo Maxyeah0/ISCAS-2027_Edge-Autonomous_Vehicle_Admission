@@ -1,0 +1,69 @@
+(* Identity indistinguishability, ONE challenge vehicle session, active network.
+   Public candidate identities and group; trusted TA/RSU keys. No corruption,
+   enrollment leakage, revocation, expiry, network identifiers or timing model.
+   Left: ID0. Right: ID1. This is not a multi-session unlinkability proof.
+   Application messages from the supplied source model are retained.
+*)
+free c: channel.
+type host.
+type nonce.
+type challenge.
+type skey.
+free ID0, ID1, g: host.
+free messageV, messageR: bitstring [private].
+fun H7(bitstring,bitstring,bitstring,bitstring,bitstring,bitstring,bitstring):bitstring.
+fun aead_enc(bitstring,skey,nonce):bitstring.
+reduc forall m:bitstring,k:skey,n:nonce;
+    aead_dec(aead_enc(m,k,n),k,n)=m.
+fun senc(skey,bitstring):bitstring.
+reduc forall k:skey,m:bitstring; sdec(k,senc(k,m))=m.
+fun PUFi(challenge):skey [private].
+fun HMAC(skey,bitstring):bitstring.
+fun kdfSK(skey,bitstring):skey.
+fun kdfK2(skey,bitstring):skey.
+fun credential(bitstring,skey,nonce):bitstring [data].
+fun auth1_data(bitstring,nonce,nonce,nonce,host):bitstring [data].
+fun nonce_to_bitstring(nonce):bitstring [data,typeConverter].
+fun host_to_bitstring(host):bitstring [data,typeConverter].
+
+let vehicle(nIV:nonce,Ci:challenge,Mi:bitstring)=
+    let Ki=PUFi(Ci) in
+    new Ni:nonce; new ti:nonce;
+    let AM1=HMAC(Ki,auth1_data(Mi,ti,Ni,nIV,g)) in
+    out(c,(Mi,ti,g,nIV,Ni,AM1));
+    in(c,(tj:nonce,Nj:nonce,AM2:bitstring));
+    let D=H7(Mi,nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),
+        nonce_to_bitstring(ti),nonce_to_bitstring(tj),
+        host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK=kdfSK(Ki,D) in
+    let KR=kdfK2(Ki,D) in
+    let (nextNonce:nonce,nextCredential:bitstring)=aead_dec(AM2,KR,nIV) in
+    new nV:nonce;
+    out(c,(nV,aead_enc(messageV,SK,nV)));
+    out(c,senc(SK,messageV)).
+
+let rsu(Kenc:skey)=
+    in(c,(Mi:bitstring,ti:nonce,gIn:host,nIV:nonce,Ni:nonce,AM1:bitstring));
+    if gIn=g then
+    let credential(rho:bitstring,Ki:skey,texp:nonce)=aead_dec(Mi,Kenc,nIV) in
+    if AM1=HMAC(Ki,auth1_data(Mi,ti,Ni,nIV,g)) then
+    new tj:nonce; new Nj:nonce; new nextNonce:nonce;
+    let D=H7(Mi,nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),
+        nonce_to_bitstring(ti),nonce_to_bitstring(tj),
+        host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK=kdfSK(Ki,D) in
+    let KR=kdfK2(Ki,D) in
+    let nextCredential=aead_enc(credential(rho,Ki,texp),Kenc,nextNonce) in
+    out(c,(tj,Nj,aead_enc((nextNonce,nextCredential),KR,nIV)));
+    in(c,(nV:nonce,AppV:bitstring));
+    let receivedV=aead_dec(AppV,SK,nV) in
+    out(c,senc(SK,messageR)).
+
+process
+    new Kenc:skey; new Krev:skey;
+    new Ci:challenge; new nIV:nonce; new texp:nonce;
+    let ID=choice[ID0,ID1] in
+    let Ki=PUFi(Ci) in
+    let rho=HMAC(Krev,(host_to_bitstring(ID),host_to_bitstring(g))) in
+    let Mi=aead_enc(credential(rho,Ki,texp),Kenc,nIV) in
+    (vehicle(nIV,Ci,Mi) | !rsu(Kenc))

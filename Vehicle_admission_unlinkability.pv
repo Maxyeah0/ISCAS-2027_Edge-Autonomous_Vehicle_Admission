@@ -1,0 +1,97 @@
+(* BOUNDED PASSIVE transcript equivalence, two successful sequential sessions.
+   Left: vehicle A then vehicle A USING ITS ACTUALLY REFRESHED CREDENTIAL.
+   Right: vehicle A then independently enrolled vehicle B.
+   Same public group and payloads; unexpired, nonrevoked memberships.
+   Private transport channels enforce honest delivery, BUT EVERY original
+   wireless message is also output on public c. These channels are a passive
+   observer modeling device, NOT a claim that V2I transport is confidential.
+   No active message injection, corruption/NVM snapshot, revocation changes,
+   arbitrary concurrency, IP/MAC/physical tracking, or unbounded sessions.
+*)
+free c:channel.
+type host.
+type nonce.
+type challenge.
+type skey.
+free ID0,ID1,g:host.
+free messageV,messageR:bitstring [private].
+event bothSessionsCompleted().
+fun H7(bitstring,bitstring,bitstring,bitstring,bitstring,bitstring,bitstring):bitstring.
+fun aead_enc(bitstring,skey,nonce):bitstring.
+reduc forall m:bitstring,k:skey,n:nonce; aead_dec(aead_enc(m,k,n),k,n)=m.
+fun senc(skey,bitstring):bitstring.
+reduc forall k:skey,m:bitstring; sdec(k,senc(k,m))=m.
+fun PUFi(challenge):skey [private].
+fun HMAC(skey,bitstring):bitstring.
+fun kdfSK(skey,bitstring):skey.
+fun kdfK2(skey,bitstring):skey.
+fun credential(bitstring,skey,nonce):bitstring [data].
+fun auth1_data(bitstring,nonce,nonce,nonce,host):bitstring [data].
+fun nonce_to_bitstring(nonce):bitstring [data,typeConverter].
+fun host_to_bitstring(host):bitstring [data,typeConverter].
+
+let vehicle(v2r:channel,r2v:channel,done:channel,
+            nIV:nonce,Ki:skey,Mi:bitstring)=
+    new Ni:nonce; new ti:nonce;
+    let AM1=HMAC(Ki,auth1_data(Mi,ti,Ni,nIV,g)) in
+    let M1=(Mi,ti,g,nIV,Ni,AM1) in
+    out(c,M1); out(v2r,M1);
+    in(r2v,(tj:nonce,Nj:nonce,AM2:bitstring));
+    let D=H7(Mi,nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),
+        nonce_to_bitstring(ti),nonce_to_bitstring(tj),
+        host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK=kdfSK(Ki,D) in
+    let KR=kdfK2(Ki,D) in
+    let (nextNonce:nonce,nextCredential:bitstring)=aead_dec(AM2,KR,nIV) in
+    new nV:nonce;
+    let app=(nV,aead_enc(messageV,SK,nV)) in
+    out(c,app); out(v2r,app);
+    out(c,senc(SK,messageV));
+    (* Wait for the RSU's original application reply before session 2. *)
+    in(r2v,reply:bitstring);
+    let received=sdec(SK,reply) in
+    if received=messageR then
+    out(done,(nextNonce,nextCredential)).
+
+let rsu(v2r:channel,r2v:channel,Kenc:skey)=
+    in(v2r,(Mi:bitstring,ti:nonce,gIn:host,nIV:nonce,Ni:nonce,AM1:bitstring));
+    if gIn=g then
+    let credential(rho:bitstring,Ki:skey,texp:nonce)=aead_dec(Mi,Kenc,nIV) in
+    if AM1=HMAC(Ki,auth1_data(Mi,ti,Ni,nIV,g)) then
+    new tj:nonce; new Nj:nonce; new nextNonce:nonce;
+    let D=H7(Mi,nonce_to_bitstring(Ni),nonce_to_bitstring(Nj),
+        nonce_to_bitstring(ti),nonce_to_bitstring(tj),
+        host_to_bitstring(g),nonce_to_bitstring(nIV)) in
+    let SK=kdfSK(Ki,D) in
+    let KR=kdfK2(Ki,D) in
+    let nextCredential=aead_enc(credential(rho,Ki,texp),Kenc,nextNonce) in
+    let M2=(tj,Nj,aead_enc((nextNonce,nextCredential),KR,nIV)) in
+    out(c,M2); out(r2v,M2);
+    in(v2r,(nV:nonce,AppV:bitstring));
+    let received=aead_dec(AppV,SK,nV) in
+    let reply=senc(SK,messageR) in
+    out(c,reply); out(r2v,reply).
+
+let session(nIV:nonce,Ki:skey,Mi:bitstring,Kenc:skey,done:channel)=
+    new v2r:channel; new r2v:channel;
+    (vehicle(v2r,r2v,done,nIV,Ki,Mi) | rsu(v2r,r2v,Kenc)).
+
+process
+    new Kenc:skey; new Krev:skey;
+    new CA:challenge; new CB:challenge;
+    new nA:nonce; new nB:nonce; new texp:nonce;
+    let KA=PUFi(CA) in
+    let KB=PUFi(CB) in
+    let rhoA=HMAC(Krev,(host_to_bitstring(ID0),host_to_bitstring(g))) in
+    let rhoB=HMAC(Krev,(host_to_bitstring(ID1),host_to_bitstring(g))) in
+    let credA=aead_enc(credential(rhoA,KA,texp),Kenc,nA) in
+    let credB=aead_enc(credential(rhoB,KB,texp),Kenc,nB) in
+    new done1:channel; new done2:channel;
+    (session(nA,KA,credA,Kenc,done1) |
+     in(done1,(updatedNonce:nonce,updatedCredential:bitstring));
+     let secondNonce=choice[updatedNonce,nB] in
+     let secondCredential=choice[updatedCredential,credB] in
+     let secondKey=choice[KA,KB] in
+     (session(secondNonce,secondKey,secondCredential,Kenc,done2) |
+      in(done2,(finalNonce:nonce,finalCredential:bitstring));
+      event bothSessionsCompleted()))
